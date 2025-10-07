@@ -1,5 +1,12 @@
+# Node dependencies
 node_modules/
+
+# Log files
 logs/
+*.log
+
+# Temporary files
 temp/
+
+# Environment variables
 .env
-".env" 
