@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:6.0
+    container_name: mongodb-dev
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: nLRLh8rL2w
+      MONGO_INITDB_DATABASE: development_db
+    volumes:
+      - development_mongo-data-dev:/data/db
+    ports:
+      - "37017:27017"
+    networks:
+      - analyzer-network
+
+  analyzer-api:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: source-analyzer-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - MONGO_URI=mongodb://root:nLRLh8rL2w@mongodb:27017/development_db?authSource=admin
+      - PORT=3000
+    depends_on:
+      - mongodb
+    volumes:
+      - ./rules:/app/rules
+      - ./logs:/app/logs
+      - ./temp:/app/temp
+    networks:
+      - analyzer-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  analyzer-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: source-analyzer-worker
+    restart: unless-stopped
+    command: npm run worker
+    environment:
+      - NODE_ENV=production
+      - MONGO_URI=mongodb://root:nLRLh8rL2w@mongodb:27017/development_db?authSource=admin
+    depends_on:
+      - mongodb
+    volumes:
+      - ./rules:/app/rules
+      - ./logs:/app/logs
+      - ./temp:/app/temp
+    networks:
+      - analyzer-network
+
+volumes:
+  development_mongo-data-dev:
+
+networks:
+  analyzer-network:
+    driver: bridge

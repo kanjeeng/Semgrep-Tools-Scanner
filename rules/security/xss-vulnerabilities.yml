@@ -1,0 +1,46 @@
+rules:
+  - id: xss-innerhtml
+    languages: [javascript, typescript]
+    message: Potential XSS vulnerability - innerHTML with user input
+    severity: ERROR
+    patterns:
+      - pattern: |
+          $ELEMENT.innerHTML = $INPUT
+      - pattern: |
+          $ELEMENT.outerHTML = $INPUT
+    metadata:
+      category: security
+      cwe: "CWE-79"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      description: "Direct assignment of user input to innerHTML can lead to XSS attacks"
+
+  - id: xss-document-write
+    languages: [javascript, typescript]
+    message: Potential XSS vulnerability - document.write with user input
+    severity: ERROR
+    patterns:
+      - pattern: |
+          document.write($INPUT)
+      - pattern: |
+          document.writeln($INPUT)
+    metadata:
+      category: security
+      cwe: "CWE-79"
+      confidence: HIGH
+      description: "Using document.write with user input can lead to XSS vulnerabilities"
+
+  - id: xss-jquery-html
+    languages: [javascript, typescript]
+    message: Potential XSS vulnerability - jQuery html() with user input
+    severity: ERROR
+    patterns:
+      - pattern: |
+          $($SELECTOR).html($INPUT)
+      - pattern: |
+          jQuery($SELECTOR).html($INPUT)
+    metadata:
+      category: security
+      cwe: "CWE-79"
+      confidence: HIGH
+      description: "Using jQuery html() method with user input can lead to XSS attacks"

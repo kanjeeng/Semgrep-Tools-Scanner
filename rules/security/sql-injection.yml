@@ -1,0 +1,52 @@
+rules:
+  - id: sql-injection-concatenation
+    languages: [javascript, typescript, python, java, php]
+    message: Potential SQL injection vulnerability - string concatenation in query
+    severity: ERROR
+    patterns:
+      - pattern: |
+          $QUERY = "SELECT ... " + $INPUT + " ..."
+      - pattern: |
+          $QUERY = "INSERT ... " + $INPUT + " ..."
+      - pattern: |
+          $QUERY = "UPDATE ... " + $INPUT + " ..."
+      - pattern: |
+          $QUERY = "DELETE ... " + $INPUT + " ..."
+    metadata:
+      category: security
+      cwe: "CWE-89"
+      owasp: "A03:2021 - Injection"
+      confidence: HIGH
+      description: "Dynamic SQL query construction with user input can lead to SQL injection attacks"
+
+  - id: sql-injection-template-literal
+    languages: [javascript, typescript]
+    message: Potential SQL injection vulnerability - template literal in query
+    severity: ERROR
+    patterns:
+      - pattern: |
+          $QUERY = `SELECT ... ${$INPUT} ...`
+      - pattern: |
+          $QUERY = `INSERT ... ${$INPUT} ...`
+    metadata:
+      category: security
+      cwe: "CWE-89"
+      confidence: HIGH
+      description: "Using template literals with user input in SQL queries can lead to injection"
+
+  - id: sql-injection-direct-execution
+    languages: [javascript, typescript, python]
+    message: Direct SQL execution with user input
+    severity: ERROR
+    patterns:
+      - pattern: |
+          $CONNECTION.query("..." + $INPUT + "...")
+      - pattern: |
+          $CONNECTION.execute("..." + $INPUT + "...")
+      - pattern: |
+          cursor.execute("..." + $INPUT + "...")
+    metadata:
+      category: security
+      cwe: "CWE-89"
+      confidence: HIGH
+      description: "Direct execution of SQL queries with concatenated user input is dangerous"

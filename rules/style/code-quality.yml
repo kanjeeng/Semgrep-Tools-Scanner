@@ -1,0 +1,48 @@
+rules:
+  - id: console-log
+    languages: [javascript, typescript]
+    message: console.log should not be committed to production code
+    severity: INFO
+    patterns:
+      - pattern: |
+          console.log(...)
+      - pattern: |
+          console.error(...)
+      - pattern: |
+          console.warn(...)
+    metadata:
+      category: style
+      confidence: HIGH
+      description: "Console statements should be removed before committing to production"
+
+  - id: unused-variable
+    languages: [javascript, typescript, python]
+    message: Unused variable detected
+    severity: INFO
+    patterns:
+      - pattern: |
+          let $VARIABLE = ...;
+        where:
+          - metavariable-pattern:
+              metavariable: $VARIABLE
+              pattern-not: $VARIABLE
+    metadata:
+      category: style
+      confidence: MEDIUM
+      description: "Unused variables should be removed to keep code clean"
+
+  - id: magic-number
+    languages: [javascript, typescript, python, java]
+    message: Magic number should be replaced with named constant
+    severity: INFO
+    patterns:
+      - pattern: |
+          ... 1000 ...
+      - pattern: |
+          ... 60 ...
+      - pattern: |
+          ... 24 ...
+    metadata:
+      category: style
+      confidence: LOW
+      description: "Magic numbers make code harder to understand and maintain"

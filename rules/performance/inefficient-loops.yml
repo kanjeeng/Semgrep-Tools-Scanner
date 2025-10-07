@@ -1,0 +1,51 @@
+rules:
+  - id: inefficient-array-copy
+    languages: [javascript, typescript]
+    message: Inefficient array copying using loop
+    severity: WARNING
+    patterns:
+      - pattern: |
+          for (let i = 0; i < $ARRAY.length; i++) {
+            $NEW_ARRAY.push($ARRAY[i]);
+          }
+    fix: |
+      const $NEW_ARRAY = [...$ARRAY];
+    metadata:
+      category: performance
+      confidence: MEDIUM
+      description: "Use spread operator or Array.from() for more efficient array copying"
+
+  - id: dom-query-in-loop
+    languages: [javascript, typescript]
+    message: DOM query inside loop causing performance issues
+    severity: WARNING
+    patterns:
+      - pattern: |
+          for (let i = 0; i < $COUNT; i++) {
+            document.querySelector($SELECTOR);
+          }
+    fix: |
+      const $ELEMENT = document.querySelector($SELECTOR);
+      for (let i = 0; i < $COUNT; i++) {
+        // Use $ELEMENT
+      }
+    metadata:
+      category: performance
+      confidence: HIGH
+      description: "DOM queries are expensive and should not be placed inside loops"
+
+  - id: nested-loop-on-large-data
+    languages: [javascript, typescript, python, java]
+    message: Nested loops on large datasets can cause performance issues
+    severity: WARNING
+    patterns:
+      - pattern: |
+          for (let i = 0; i < $LARGE_ARRAY.length; i++) {
+            for (let j = 0; j < $LARGE_ARRAY.length; j++) {
+              ...
+            }
+          }
+    metadata:
+      category: performance
+      confidence: MEDIUM
+      description: "Nested loops on large datasets have O(n²) complexity and can cause performance issues"
