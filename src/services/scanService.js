@@ -3,6 +3,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const simpleGit = require('simple-git');
 const { v4: uuidv4 } = require('uuid');
+const yaml = require('yaml');
 
 const Project = require('../models/Project');
 const ScanJob = require('../models/ScanJob');
@@ -34,15 +35,25 @@ class ScanService {
   }
 
   // Create a new scan job
-  async createScanJob(projectId, triggerData = {}) {
+  async createScanJob(projectId, triggerData = {}, isLocalScan = false) {
     try {
-      const project = await Project.findById(projectId);
-      if (!project) {
-        throw new Error('Project not found');
+      let project = null;
+      let rules = [];
+
+      if (projectId) {
+        project = await Project.findById(projectId);
+        if (!project) {
+          throw new Error('Project not found');
+        }
+        rules = await project.getActiveScanRules();
+      } else if (isLocalScan) {
+        // For local scans without a project, use all available security rules
+        rules = await SemgrepRule.find({ 
+            enabled: true, 
+            category: 'security' 
+        });
       }
 
-      // Get active rules for this project
-      const rules = await project.getActiveScanRules();
       if (rules.length === 0) {
         throw new Error('No active rules found for project');
       }
@@ -53,20 +64,25 @@ class ScanService {
         trigger_event: triggerData.event || 'manual_trigger',
         status: 'pending',
         priority: triggerData.priority || 5,
-        commit_sha: triggerData.commit_sha,
-        commit_message: triggerData.commit_message,
-        branch: triggerData.branch || project.branch,
+        commit_sha: triggerData.commit_sha || 'N/A',
+        commit_message: triggerData.commit_message || 'N/A',
+        branch: triggerData.branch || (project ? project.branch : 'local-scan'),
         pr_number: triggerData.pr_number,
         pr_title: triggerData.pr_title,
         pr_author: triggerData.pr_author,
         ruleset: rules.map(rule => rule._id),
         scan_config: {
-          include_paths: project.scan_config.include_paths || [],
-          exclude_paths: project.scan_config.exclude_paths || [],
-          max_file_size_kb: project.scan_config.max_file_size_kb || 1024,
-          timeout_seconds: project.scan_config.timeout_seconds || this.semgrepTimeout
+          include_paths: (project ? project.scan_config.include_paths : []) || [],
+          exclude_paths: (project ? project.scan_config.exclude_paths : semgrepConfig.getDefaultExcludePatterns()) || [],
+          max_file_size_kb: (project ? project.scan_config.max_file_size_kb : 1024) || 1024,
+          timeout_seconds: (project ? project.scan_config.timeout_seconds : this.semgrepTimeout) || this.semgrepTimeout
         },
-        metadata: triggerData.metadata || {}
+        metadata: triggerData.metadata || {
+            ...triggerData.metadata || {},
+            is_local_scan: isLocalScan, 
+            local_path: triggerData.local_path, 
+            user_access_token: triggerData.user_access_token
+        }
       };
 
       const job = new ScanJob(jobData);
@@ -87,6 +103,7 @@ class ScanService {
   async executeScan(jobId) {
     let job = null;
     let workingDir = null;
+    let repoPath = null;
     
     try {
       job = await ScanJob.findById(jobId).populate('project_id');
@@ -97,38 +114,54 @@ class ScanService {
       if (job.status !== 'pending' && job.status !== 'queued') {
         throw new Error(`Job is not in executable state: ${job.status}`);
       }
-
+      // 1. Update status ke running (SEKUENTIAL SAVE)
       // Update job status
       await job.updateStatus('running');
+      await job.save(); // <--- EXPLICIT SAVE 1
+
       await job.addLog('info', 'Starting scan execution');
+      await job.save(); // <--- EXPLICIT SAVE 2 (separated)
 
-      // Create working directory
-      workingDir = path.join(this.tempDir, `scan-${jobId}-${Date.now()}`);
-      await fs.ensureDir(workingDir);
+      // 1. Determine Scan Source: Local Upload or Git Clone
+      if (job.metadata.is_local_scan && job.metadata.local_path) {
+        // Local Scan: Use the provided local path directly
+        repoPath = job.metadata.local_path;
+        await job.addLog('info', `Scanning local path: ${repoPath}`);
 
-      // Clone repository
-      await job.addLog('info', 'Cloning repository...');
-      const repoPath = await this.cloneRepository(job, workingDir);
+      } else {
+        // Git Clone: Create working directory and clone repository
+        workingDir = path.join(this.tempDir, `scan-${jobId}-${Date.now()}`);
+        await fs.ensureDir(workingDir);
+        
+        // Use the user's access token if available from job metadata
+        const accessToken = job.metadata.user_access_token || null; 
 
-      // Prepare semgrep rules
+        await job.addLog('info', 'Cloning repository...');
+        repoPath = await this.cloneRepository(job, workingDir, accessToken);
+      }
+
+      // 2. Prepare Semgrep Rules
       await job.addLog('info', 'Preparing scan rules...');
-      const rulesFile = await this.prepareRules(job, workingDir);
+      // Use workingDir for rules file (if cloning), otherwise use repoPath (local scan)
+      const rulesFile = await this.prepareRules(job, workingDir || repoPath); 
 
-      // Run semgrep scan
+      // 3. Run Semgrep Scan
       await job.addLog('info', 'Executing semgrep scan...');
       const scanResults = await this.runSemgrep(rulesFile, repoPath, job);
 
-      // Process and save results
+      // 4. Process and save results
       await job.addLog('info', `Processing ${scanResults.length} findings...`);
       await this.processScanResults(job, scanResults);
 
-      // Update job summary and status
+      // 5. Update job summary and status
       await job.updateSummary(scanResults);
       await job.updateStatus('completed');
       await job.addLog('info', `Scan completed successfully with ${scanResults.length} findings`);
 
       // Update project statistics
-      await job.project_id.updateStatistics(job);
+      if (job.project_id) {
+        await job.project_id.updateStatistics(job);
+      }
 
       return job;
 
@@ -153,22 +186,39 @@ class ScanService {
           console.warn(`Failed to cleanup working directory: ${cleanupError.message}`);
         }
       }
+
+      // // Clean up local scan directory (Local Upload)
+      // if (job && job.metadata.is_local_scan && repoPath && await fs.pathExists(repoPath)) {
+      //   try {
+      //       await fs.remove(repoPath);
+      //   } catch (cleanupError) {
+      //       console.warn(`Failed to cleanup local scan directory: ${cleanupError.message}`);
+      //   }
+      // }
       
       // Remove from active jobs
       this.activeJobs.delete(jobId);
     }
   }
 
-  // Clone repository to working directory
-  async cloneRepository(job, workingDir) {
+  // Clone repository to working directory (MODIFIED for user token)
+  async cloneRepository(job, workingDir, accessToken = null) {
     try {
       const project = job.project_id;
-      const repoPath = path.join(workingDir, 'repo');
+      const repoPath = path.join(workingDir, 'repo'); 
       
       const git = simpleGit();
       
+      let cloneUrl = project.repo_url;
+      const { owner, repo } = this.extractRepoInfo(cloneUrl);
+      
+      // Embed token in the URL for private repo access
+      if (accessToken && owner !== 'unknown') {
+        cloneUrl = `https://${accessToken}@github.com/${owner}/${repo}`;
+      }
+      
       // Clone with shallow depth for performance
-      await git.clone(project.repo_url, repoPath, ['--depth', '1', '--branch', job.branch]);
+      await git.clone(cloneUrl, repoPath, ['--depth', '1', '--branch', job.branch]);
       
       // If specific commit is requested, fetch and checkout
       if (job.commit_sha) {
@@ -184,7 +234,7 @@ class ScanService {
       // Get repository info
       const repoGit = simpleGit(repoPath);
       const log = await repoGit.log(['-1']);
-      const status = await repoGit.status();
+      // Note: Removed unused `status` variable initialization
       
       job.repository_info = {
         clone_url: project.repo_url,
@@ -202,6 +252,53 @@ class ScanService {
       return repoPath;
     } catch (error) {
       throw new Error(`Failed to clone repository: ${error.message}`);
+    }
+  }
+
+    extractRepoInfo(repoUrl) {
+    const match = repoUrl.match(/github\.com[/:]([^/]+)\/([^/\.]+)/);
+    if (!match) {
+      return { owner: 'unknown', repo: 'unknown' }; 
+    }
+    return { owner: match[1], repo: match[2].replace(/\.git$/, '') }; 
+  }
+  
+  // Prepare semgrep rules (original logic, ensure yaml is used)
+  async prepareRules(job, workingDir) {
+    try {
+      const rules = await SemgrepRule.find({
+        _id: { $in: job.ruleset },
+        enabled: true
+      });
+
+      if (rules.length === 0) {
+        throw new Error('No enabled rules found for scan');
+      }
+
+      const rulesConfig = {
+        rules: rules.map(rule => {
+          const ruleConfig = {
+            id: rule._id,
+            languages: rule.language,
+            message: rule.message,
+            severity: rule.severity,
+            patterns: rule.patterns
+          };
+          
+          if (rule.metadata && Object.keys(rule.metadata).length > 0) {
+            ruleConfig.metadata = rule.metadata;
+          }
+          
+          return ruleConfig;
+        })
+      };
+
+      const rulesFile = path.join(workingDir, 'scan-rules.yml');
+      await fs.writeFile(rulesFile, yaml.stringify(rulesConfig));
+      
+      return rulesFile;
+    } catch (error) {
+      throw new Error(`Failed to prepare rules: ${error.message}`);
     }
   }
 
@@ -547,5 +644,7 @@ class ScanService {
     }
   }
 }
+
+
 
 module.exports = new ScanService();

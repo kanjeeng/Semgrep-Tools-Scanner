@@ -3,6 +3,29 @@ const router = express.Router();
 const Project = require('../models/Project');
 const ScanJob = require('../models/ScanJob');
 const scanService = require('../services/scanService');
+const githubService = require('../services/githubService'); 
+const { ensureAuthenticated } = require('./auth'); // NEW: Import Auth Middleware
+const multer = require('multer'); // NEW: Untuk upload file
+const fs = require('fs-extra'); // NEW
+const path = require('path'); // NEW
+const { v4: uuidv4 } = require('uuid'); // NEW
+const AdmZip = require('adm-zip'); // NEW: Untuk ekstraksi ZIP
+
+// Konfigurasi Multer untuk upload file lokal
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        // Simpan file zip di direktori 'uploads'
+        cb(null, path.join(__dirname, '../../uploads'));
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${uuidv4()}-${file.originalname}`);
+    }
+});
+
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 50 * 1024 * 1024 } // Batas 50MB
+}).single('project_zip'); // Nama field yang diharapkan dari form
 
 // GET /api/projects - Get all projects
 router.get('/', async (req, res) => {
@@ -86,15 +109,45 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+// GET /api/projects/github/repos - Get user's GitHub repositories (ENDPOINT BARU)
+router.get('/github/repos', ensureAuthenticated, async (req, res) => {
+  try {
+    // req.user tersedia karena ensureAuthenticated sudah berjalan
+    const accessToken = req.user.access_token; 
+    
+    if (!accessToken) {
+      return res.status(401).json({
+        success: false,
+        error: 'User not authenticated with GitHub or missing access token.'
+      });
+    }
+
+    const repositories = await githubService.getUserRepositories(accessToken);
+    
+    res.json({
+      success: true,
+      count: repositories.length,
+      data: repositories
+    });
+  } catch (error) {
+    console.error('❌ Failed to fetch user repositories:', error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // POST /api/projects - Create new project
-router.post('/', async (req, res) => {
+router.post('/', ensureAuthenticated, async (req, res) => {
   try {
     const projectData = {
       ...req.body,
-      created_by: req.headers['x-user-id'] || 'api'
+      created_by: req.user.username || 'api', 
+      owner: req.user.username || 'unknown' // Set owner to the logged-in user
     };
 
-    // Validate GitHub URL format
+    // Validasi GitHub URL format
     if (!projectData.repo_url || !projectData.repo_url.includes('github.com')) {
       return res.status(400).json({
         success: false,
@@ -128,8 +181,76 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PUT /api/projects/:id - Update project
-router.put('/:id', async (req, res) => {
+// POST /api/projects/upload/scan - Upload folder and trigger scan (NEW ROUTE: Requires Authentication)
+router.post('/upload/scan', ensureAuthenticated, (req, res) => {
+    upload(req, res, async (err) => {
+        if (err instanceof multer.MulterError) {
+            return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
+        } else if (err) {
+            return res.status(500).json({ success: false, error: `Unknown error: ${err.message}` });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'File upload is required (field: project_zip)' });
+        }
+        
+        if (!req.file.originalname.toLowerCase().endsWith('.zip')) {
+            await fs.remove(req.file.path); // Bersihkan file non-zip
+            return res.status(400).json({ success: false, error: 'Only ZIP files are supported for project upload.' });
+        }
+
+        const zipFilePath = req.file.path;
+        // Buat folder unik untuk ekstraksi di direktori temp
+        const scanDirName = `local-scan-${uuidv4()}`;
+        const scanDirPath = path.join(__dirname, '../../temp', scanDirName);
+
+        try {
+            // 1. Ekstraksi file ZIP
+            await fs.ensureDir(scanDirPath);
+            const zip = new AdmZip(zipFilePath);
+            zip.extractAllTo(scanDirPath, true);
+
+            // 2. Hapus file ZIP yang asli
+            await fs.remove(zipFilePath);
+
+            // 3. Buat dan antrikan scan job (isLocalScan = true)
+            const triggerData = {
+                source: 'local-upload',
+                event: 'file_upload',
+                priority: 8,
+                branch: 'local-scan',
+                commit_sha: 'local-scan-commit',
+                metadata: {
+                    triggered_by: req.user.username,
+                    original_file: req.file.originalname,
+                },
+                local_path: scanDirPath // Path folder yang akan di scan
+            };
+            
+            // Project ID adalah null karena ini adalah scan sementara
+            const scanJob = await scanService.createScanJob(null, triggerData, true); 
+            
+            res.status(201).json({
+                success: true,
+                message: 'Project uploaded, extracted, and scan job queued',
+                data: scanJob
+            });
+
+        } catch (error) {
+            console.error('Local scan processing error:', error);
+            // Bersihkan file dan folder jika terjadi error
+            await fs.remove(zipFilePath).catch(() => {});
+            await fs.remove(scanDirPath).catch(() => {});
+            res.status(500).json({
+                success: false,
+                error: `Failed to process uploaded project: ${error.message}`
+            });
+        }
+    });
+});
+
+// PUT /api/projects/:id - Update project (MODIFIED: Requires Authentication)
+router.put('/:id', ensureAuthenticated, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     
@@ -147,7 +268,7 @@ router.put('/:id', async (req, res) => {
       }
     });
 
-    project.updated_by = req.headers['x-user-id'] || 'api';
+    project.updated_by = req.user.username || 'api'; // Set updated_by
     await project.save();
     
     res.json({
@@ -166,8 +287,8 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE /api/projects/:id - Delete project
-router.delete('/:id', async (req, res) => {
+// DELETE /api/projects/:id - Delete project (MODIFIED: Requires Authentication)
+router.delete('/:id', ensureAuthenticated, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     
@@ -206,8 +327,8 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// POST /api/projects/:id/scan - Trigger manual scan
-router.post('/:id/scan', async (req, res) => {
+// POST /api/projects/:id/scan - Trigger manual scan (MODIFIED: Requires Auth and passes user token)
+router.post('/:id/scan', ensureAuthenticated, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     
@@ -244,8 +365,10 @@ router.post('/:id/scan', async (req, res) => {
       priority: req.body.priority || 5,
       branch: req.body.branch || project.branch,
       commit_sha: req.body.commit_sha,
+      // Pass GitHub access token for cloning private repositories
+      user_access_token: req.user.access_token, 
       metadata: {
-        triggered_by: req.headers['x-user-id'] || 'api',
+        triggered_by: req.user.username || 'api',
         trigger_reason: req.body.reason || 'Manual scan requested'
       }
     };
@@ -349,8 +472,8 @@ router.get('/:id/stats', async (req, res) => {
   }
 });
 
-// PUT /api/projects/:id/config - Update scan configuration
-router.put('/:id/config', async (req, res) => {
+// PUT /api/projects/:id/config - Update scan configuration (MODIFIED: Requires Authentication)
+router.put('/:id/config', ensureAuthenticated, async (req, res) => {
   try {
     const project = await Project.findById(req.params.id);
     
@@ -373,7 +496,7 @@ router.put('/:id/config', async (req, res) => {
       }
     });
 
-    project.updated_by = req.headers['x-user-id'] || 'api';
+    project.updated_by = req.user.username || 'api'; // Set updated_by
     await project.save();
     
     res.json({

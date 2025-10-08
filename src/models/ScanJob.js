@@ -39,7 +39,6 @@ const scanJobSchema = new mongoose.Schema({
   commit_sha: {
     type: String,
     trim: true,
-    match: /^[a-f0-9]{7,40}$/
   },
   commit_message: {
     type: String,
@@ -169,7 +168,7 @@ scanJobSchema.methods.addLog = function(level, message, metadata = {}) {
     this.log = this.log.slice(-1000);
   }
   
-  return this.save();
+  return this;
 };
 
 scanJobSchema.methods.updateStatus = async function(newStatus, error = null) {
@@ -191,7 +190,7 @@ scanJobSchema.methods.updateStatus = async function(newStatus, error = null) {
     this.addLog('info', `Status changed to ${newStatus}`);
   }
   
-  return this.save();
+  return this;
 };
 
 scanJobSchema.methods.updateSummary = function(scanResults = []) {
@@ -212,7 +211,7 @@ scanJobSchema.methods.updateSummary = function(scanResults = []) {
   this.summary.severity_count = severityCount;
   this.summary.categories = categoryCount;
   
-  return this.save();
+  return this;
 };
 
 scanJobSchema.methods.canBeRetried = function() {

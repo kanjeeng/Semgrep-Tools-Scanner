@@ -5,17 +5,20 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const fs = require('fs-extra');
 const path = require('path');
+const session = require('express-session'); // NEW
+const passport = require('./config/passport'); // NEW
 
 // Import configurations and services
 const database = require('./config/database');
 const semgrepConfig = require('./config/semgrep');
 const ruleService = require('./services/ruleService');
 
-// Import routes
+// Import routes (HANYA SEKALI DEKLARASI)
 const rulesRoutes = require('./routes/rules');
 const projectsRoutes = require('./routes/projects');
 const scansRoutes = require('./routes/scans');
 const webhooksRoutes = require('./routes/webhooks');
+const authRoutes = require('./routes/auth').router; // NEW: Ambil router dari auth.js
 
 class SourceAnalyzerApp {
   constructor() {
@@ -65,6 +68,18 @@ class SourceAnalyzerApp {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true }));
 
+    // Session Middleware (Diperlukan untuk Passport)
+    this.app.use(session({
+      secret: process.env.SESSION_SECRET || 'a-strong-default-secret',
+      resave: false,
+      saveUninitialized: false,
+      cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+    }));
+
+    // Passport Initialization
+    this.app.use(passport.initialize());
+    this.app.use(passport.session());
+
     // Logging middleware
     this.app.use(morgan('combined', {
       stream: fs.createWriteStream(path.join(__dirname, '../logs/access.log'), { flags: 'a' })
@@ -109,6 +124,7 @@ class SourceAnalyzerApp {
     });
 
     // API routes
+    this.app.use('/auth', authRoutes); // Rute Autentikasi
     this.app.use(`${this.apiPrefix}/rules`, rulesRoutes);
     this.app.use(`${this.apiPrefix}/projects`, projectsRoutes);
     this.app.use(`${this.apiPrefix}/scans`, scansRoutes);
@@ -155,7 +171,7 @@ class SourceAnalyzerApp {
   }
 
   initializeErrorHandling() {
-    // 404 handler
+    // 404 handler (INI ADALAH MASALAHNYA!)
     this.app.use('*', (req, res) => {
       res.status(404).json({
         success: false,
@@ -199,7 +215,8 @@ class SourceAnalyzerApp {
       'rules/security',
       'rules/performance',
       'rules/style',
-      'rules/correctness'
+      'rules/correctness',
+      'uploads' // Tambahan untuk upload lokal
     ];
 
     for (const dir of directories) {
@@ -226,6 +243,7 @@ class SourceAnalyzerApp {
    POST ${this.apiPrefix}/projects       - Create new project
    GET  ${this.apiPrefix}/scans          - List scan jobs
    POST /webhooks/github                 - GitHub webhook endpoint
+   GET  /auth/github                     - Start GitHub Login
 
 💡 Don't forget to:
    1. Configure your .env file

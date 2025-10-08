@@ -6,21 +6,79 @@ class GitHubService {
     this.baseURL = 'https://api.github.com';
     this.token = process.env.GITHUB_TOKEN;
     this.webhookSecret = process.env.GITHUB_WEBHOOK_SECRET;
-    this.api = axios.create({
+    this.defaultApi = axios.create({
       baseURL: this.baseURL,
       headers: {
         'Authorization': this.token ? `token ${this.token}` : '',
-        'Accept': 'application/vnd.github.v3+json',
+        'Accept': 'application/vnd.github.com.v3+json',
         'User-Agent': 'source-code-analyzer'
       }
     });
   }
 
-  // Validate GitHub repository access
+  // Utility untuk mendapatkan instance Axios dengan token dinamis (token user)
+  getApiInstance(userToken) {
+    if (userToken) {
+        return axios.create({
+            baseURL: this.baseURL,
+            headers: {
+                // Menggunakan token user untuk Authorization
+                'Authorization': `token ${userToken}`, 
+                'Accept': 'application/vnd.github.com.v3+json',
+                'User-Agent': 'source-code-analyzer'
+            }
+        });
+    }
+    // Fallback ke default API jika token user tidak disediakan
+    return this.defaultApi;
+  }
+
+  // Metode Baru: Mengambil repositori milik user yang login
+  async getUserRepositories(userAccessToken) {
+    if (!userAccessToken) {
+      throw new Error('User access token is required to fetch repositories.');
+    }
+    
+    // Gunakan instance yang diautentikasi dengan token pengguna
+    const api = this.getApiInstance(userAccessToken);
+
+    try {
+      // Mengambil daftar repo, termasuk yang private.
+      const response = await api.get('/user/repos', {
+        params: {
+          per_page: 100,
+          affiliation: 'owner,collaborator,organization_member' // Mendapatkan semua repo yang user miliki akses
+        }
+      });
+      
+      // Memfilter data yang relevan
+      return response.data.map(repo => ({
+        id: repo.id,
+        name: repo.full_name,
+        html_url: repo.html_url,
+        is_private: repo.private,
+        default_branch: repo.default_branch,
+        description: repo.description,
+        owner: repo.owner.login
+      }));
+
+    } catch (error) {
+      if (error.response && error.response.status === 422) {
+          console.error("GitHub API 422 Error Details (FIXED PARAMETERS):", error.response.data);
+          throw new Error('Failed to fetch user repositories: GitHub API request parameters conflict.');
+      }
+      if (error.response && error.response.status === 401) {
+        throw new Error('Unauthorized access to GitHub API. Token invalid or expired.');
+      }
+      throw new Error(`Failed to fetch user repositories: GitHub API error (${error.response ? error.response.status : 'No Response'}).`);
+    }
+  }
+
+  // Validate GitHub repository access (MENGGUNAKAN DEFAULT API, tidak diubah)
   async validateRepository(repoUrl) {
     try {
       const { owner, repo } = this.extractRepoInfo(repoUrl);
-      const response = await this.api.get(`/repos/${owner}/${repo}`);
+      const response = await this.defaultApi.get(`/repos/${owner}/${repo}`); 
       
       return {
         owner: response.data.owner.login,
@@ -50,8 +108,8 @@ class GitHubService {
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
       const webhookUrl = `${process.env.APP_URL || 'http://localhost:3000'}/webhooks/github`;
-      
-      const response = await this.api.post(`/repos/${owner}/${repo}/hooks`, {
+      // Create webhook
+      const response = await this.defaultApi.post(`/repos/${owner}/${repo}/hooks`, {
         name: 'web',
         active: true,
         events: ['push', 'pull_request'],
@@ -84,7 +142,7 @@ class GitHubService {
 
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
-      await this.api.delete(`/repos/${owner}/${repo}/hooks/${project.github_config.webhook_id}`);
+      await this.defaultApi.delete(`/repos/${owner}/${repo}/hooks/${project.github_config.webhook_id}`);
       
       // Remove webhook ID from project
       project.github_config.webhook_id = null;
@@ -122,7 +180,7 @@ class GitHubService {
 
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
-      const response = await this.api.post(
+      const response = await this.defaultApi.post(
         `/repos/${owner}/${repo}/issues/${prNumber}/comments`,
         { body: comment }
       );
@@ -141,7 +199,7 @@ class GitHubService {
 
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
-      const response = await this.api.get(`/repos/${owner}/${repo}/pulls/${prNumber}`);
+      const response = await this.defaultApi.get(`/repos/${owner}/${repo}/pulls/${prNumber}`);
 
       return response.data;
     } catch (error) {
@@ -153,7 +211,7 @@ class GitHubService {
   async getRepositoryLanguages(project) {
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
-      const response = await this.api.get(`/repos/${owner}/${repo}/languages`);
+      const response = await this.defaultApi.get(`/repos/${owner}/${repo}/languages`);
 
       return Object.keys(response.data);
     } catch (error) {
@@ -170,7 +228,7 @@ class GitHubService {
 
     try {
       const { owner, repo } = this.extractRepoInfo(project.repo_url);
-      const response = await this.api.get(`/repos/${owner}/${repo}/contents/${path}`);
+      const response = await this.defaultApi.get(`/repos/${owner}/${repo}/contents/${path}`);
 
       return response.data;
     } catch (error) {
@@ -184,13 +242,14 @@ class GitHubService {
     if (!match) {
       throw new Error('Invalid GitHub repository URL');
     }
-    return { owner: match[1], repo: match[2] };
+    // Menghilangkan suffix .git
+    return { owner: match[1], repo: match[2].replace(/\.git$/, '') }; 
   }
 
   // Check rate limit status
   async getRateLimit() {
     try {
-      const response = await this.api.get('/rate_limit');
+      const response = await this.defaultApi.get('/rate_limit');
       return response.data;
     } catch (error) {
       console.warn('Failed to get rate limit:', error.message);
