@@ -6,6 +6,7 @@ const morgan = require('morgan');
 const fs = require('fs-extra');
 const path = require('path');
 const session = require('express-session'); // NEW
+const MongoStore = require('connect-mongo'); // NEW
 const passport = require('./config/passport'); // NEW
 
 // Import configurations and services
@@ -70,10 +71,17 @@ class SourceAnalyzerApp {
 
     // Session Middleware (Diperlukan untuk Passport)
     this.app.use(session({
-      secret: process.env.SESSION_SECRET || 'a-strong-default-secret',
-      resave: false,
-      saveUninitialized: false,
-      cookie: { maxAge: 24 * 60 * 60 * 1000 } // 24 hours
+        secret: process.env.SESSION_SECRET || 'a_very_secure_secret',
+        resave: false,
+        saveUninitialized: false,
+        store: MongoStore.create({
+            mongoUrl: process.env.MONGO_URI, // Gunakan URI koneksi MongoDB Anda
+            ttl: 14 * 24 * 60 * 60, // Sesi bertahan 14 hari
+            collectionName: 'sessions' // Nama koleksi di DB Anda
+        }),
+        cookie: {
+            maxAge: 1000 * 60 * 60 * 24 * 14 // 14 hari
+        }
     }));
 
     // Passport Initialization

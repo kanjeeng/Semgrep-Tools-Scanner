@@ -4,13 +4,13 @@ const scanJobSchema = new mongoose.Schema({
   project_id: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Project',
-    required: true,
+    required: false,
     index: true
   },
   trigger_source: {
     type: String,
     required: true,
-    enum: ['manual', 'webhook', 'scheduled', 'api'],
+    enum: ['manual', 'webhook', 'scheduled', 'api', 'local-upload'], 
     default: 'manual'
   },
   trigger_event: {
@@ -155,6 +155,8 @@ scanJobSchema.virtual('is_active').get(function() {
 });
 
 // Instance methods
+// NOTE: Logika di bawah ini (addLog, updateStatus, updateSummary) 
+// sudah diperbaiki pada jawaban sebelumnya agar TIDAK memanggil this.save()
 scanJobSchema.methods.addLog = function(level, message, metadata = {}) {
   this.log.push({
     level,

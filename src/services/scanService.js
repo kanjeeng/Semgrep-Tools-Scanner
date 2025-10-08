@@ -34,7 +34,7 @@ class ScanService {
     console.log('🔄 Scan service initialized');
   }
 
-  // Create a new scan job
+  // Create a new scan job (FIXED METADATA HANDLING)
   async createScanJob(projectId, triggerData = {}, isLocalScan = false) {
     try {
       let project = null;
@@ -77,8 +77,9 @@ class ScanService {
           max_file_size_kb: (project ? project.scan_config.max_file_size_kb : 1024) || 1024,
           timeout_seconds: (project ? project.scan_config.timeout_seconds : this.semgrepTimeout) || this.semgrepTimeout
         },
-        metadata: triggerData.metadata || {
-            ...triggerData.metadata || {},
+        // FIX: Pastikan is_local_scan dan local_path selalu ada di metadata
+        metadata: {
+            ...(triggerData.metadata || {}), // Ambil metadata lain (triggered_by, original_file)
             is_local_scan: isLocalScan, 
             local_path: triggerData.local_path, 
             user_access_token: triggerData.user_access_token
@@ -88,7 +89,8 @@ class ScanService {
       const job = new ScanJob(jobData);
       await job.save();
       
-      await job.addLog('info', 'Scan job created and queued');
+      job.addLog('info', 'Scan job created and queued');
+      await job.save(); // Save log
       
       // Add to processing queue
       this.addToQueue(job);
@@ -102,11 +104,11 @@ class ScanService {
   // Execute a scan job
   async executeScan(jobId) {
     let job = null;
-    let workingDir = null;
-    let repoPath = null;
+    let workingDir = null; 
+    let repoPath = null;  
     
     try {
-      job = await ScanJob.findById(jobId).populate('project_id');
+      job = await ScanJob.findById(jobId).populate('project_id'); 
       if (!job) {
         throw new Error('Scan job not found');
       }
@@ -114,51 +116,67 @@ class ScanService {
       if (job.status !== 'pending' && job.status !== 'queued') {
         throw new Error(`Job is not in executable state: ${job.status}`);
       }
+
+      // Deklarasi variabel local scan dari metadata
+      const isLocalScan = job.metadata.is_local_scan;
+      const localPath = job.metadata.local_path;
+
       // 1. Update status ke running (SEKUENTIAL SAVE)
-      // Update job status
-      await job.updateStatus('running');
-      await job.save(); // <--- EXPLICIT SAVE 1
+      job.updateStatus('running');
+      await job.save(); 
+      
+      job.addLog('info', 'Starting scan execution');
+      await job.save(); 
 
-      await job.addLog('info', 'Starting scan execution');
-      await job.save(); // <--- EXPLICIT SAVE 2 (separated)
+      
+      // 2. Siapkan Working Directory & Clone/Scan Lokal
+      workingDir = path.join(this.tempDir, `scan-exec-${jobId}-${Date.now()}`);
+      await fs.ensureDir(workingDir);
 
-      // 1. Determine Scan Source: Local Upload or Git Clone
-      if (job.metadata.is_local_scan && job.metadata.local_path) {
-        // Local Scan: Use the provided local path directly
-        repoPath = job.metadata.local_path;
-        await job.addLog('info', `Scanning local path: ${repoPath}`);
-
-      } else {
-        // Git Clone: Create working directory and clone repository
-        workingDir = path.join(this.tempDir, `scan-${jobId}-${Date.now()}`);
-        await fs.ensureDir(workingDir);
+      if (isLocalScan && localPath) { 
+        // JALUR LOKAL: Gunakan path lokal yang diekstrak
+        repoPath = localPath;
+        job.addLog('info', `Scanning local path (Uploaded Project): ${repoPath}`);
+        await job.save();
         
-        // Use the user's access token if available from job metadata
+      } else if (job.project_id) { 
+        // JALUR GIT: Jika project_id ada (ini adalah scan repo)
         const accessToken = job.metadata.user_access_token || null; 
-
-        await job.addLog('info', 'Cloning repository...');
+        
+        job.addLog('info', 'Cloning repository...');
+        await job.save(); 
+        
         repoPath = await this.cloneRepository(job, workingDir, accessToken);
+        // NOTE: cloneRepository calls save() internally to update repository_info
+      } else {
+        throw new Error('Scan source undefined and project ID is missing.');
       }
 
-      // 2. Prepare Semgrep Rules
-      await job.addLog('info', 'Preparing scan rules...');
-      // Use workingDir for rules file (if cloning), otherwise use repoPath (local scan)
-      const rulesFile = await this.prepareRules(job, workingDir || repoPath); 
+      // 3. Prepare Semgrep Rules
+      job.addLog('info', 'Preparing scan rules...');
+      await job.save(); 
+      
+      const rulesFile = await this.prepareRules(job, workingDir); 
 
-      // 3. Run Semgrep Scan
-      await job.addLog('info', 'Executing semgrep scan...');
+      // 4. Run Semgrep Scan
+      job.addLog('info', 'Executing semgrep scan...');
+      await job.save(); 
+      
       const scanResults = await this.runSemgrep(rulesFile, repoPath, job);
 
-      // 4. Process and save results
-      await job.addLog('info', `Processing ${scanResults.length} findings...`);
+      // 5. Process and save results
+      job.addLog('info', `Processing ${scanResults.length} findings...`);
+      await job.save(); 
+      
       await this.processScanResults(job, scanResults);
 
-      // 5. Update job summary and status
-      await job.updateSummary(scanResults);
-      await job.updateStatus('completed');
-      await job.addLog('info', `Scan completed successfully with ${scanResults.length} findings`);
+      // 6. Update job summary and status (FINAL SAVE)
+      job.updateSummary(scanResults);
+      job.updateStatus('completed');
+      job.addLog('info', `Scan completed successfully with ${scanResults.length} findings`);
+      await job.save(); 
 
-      // Update project statistics
+      // Update project statistics (hanya jika ada project ID)
       if (job.project_id) {
         await job.project_id.updateStatistics(job);
       }
@@ -169,32 +187,29 @@ class ScanService {
       console.error(`Scan execution failed for job ${jobId}:`, error);
       
       if (job) {
-        await job.updateStatus('failed', error);
-        await job.addLog('error', `Scan failed: ${error.message}`, { 
-          error: error.message,
-          stack: error.stack 
-        });
+        job.updateStatus('failed', error);
+        await job.save(); // Simpan status gagal terakhir
       }
       
       throw error;
     } finally {
-      // Clean up working directory
+      // Clean up working directory dan repo lokal (kecuali repo lokal adalah hasil upload)
       if (workingDir && await fs.pathExists(workingDir)) {
         try {
-          await fs.remove(workingDir);
+          await fs.remove(workingDir); 
         } catch (cleanupError) {
           console.warn(`Failed to cleanup working directory: ${cleanupError.message}`);
         }
       }
 
-      // // Clean up local scan directory (Local Upload)
-      // if (job && job.metadata.is_local_scan && repoPath && await fs.pathExists(repoPath)) {
-      //   try {
-      //       await fs.remove(repoPath);
-      //   } catch (cleanupError) {
-      //       console.warn(`Failed to cleanup local scan directory: ${cleanupError.message}`);
-      //   }
-      // }
+      // Hapus direktori ekstrak upload jika ada
+      if (job && job.metadata.is_local_scan && repoPath && await fs.pathExists(repoPath)) {
+        try {
+            await fs.remove(repoPath);
+        } catch (cleanupError) {
+            console.warn(`Failed to cleanup local scan directory: ${cleanupError.message}`);
+        }
+      }
       
       // Remove from active jobs
       this.activeJobs.delete(jobId);
@@ -205,6 +220,10 @@ class ScanService {
   async cloneRepository(job, workingDir, accessToken = null) {
     try {
       const project = job.project_id;
+      if (!project || !project.repo_url) {
+        throw new Error('Project object is missing or invalid for cloning.');
+      }
+      
       const repoPath = path.join(workingDir, 'repo'); 
       
       const git = simpleGit();
@@ -214,7 +233,9 @@ class ScanService {
       
       // Embed token in the URL for private repo access
       if (accessToken && owner !== 'unknown') {
-        cloneUrl = `https://${accessToken}@github.com/${owner}/${repo}`;
+        if (cloneUrl.startsWith('https://github.com')) {
+          cloneUrl = `https://${accessToken}@github.com/${owner}/${repo}`;
+        }
       }
       
       // Clone with shallow depth for performance
@@ -234,7 +255,6 @@ class ScanService {
       // Get repository info
       const repoGit = simpleGit(repoPath);
       const log = await repoGit.log(['-1']);
-      // Note: Removed unused `status` variable initialization
       
       job.repository_info = {
         clone_url: project.repo_url,
@@ -263,45 +283,6 @@ class ScanService {
     return { owner: match[1], repo: match[2].replace(/\.git$/, '') }; 
   }
   
-  // Prepare semgrep rules (original logic, ensure yaml is used)
-  async prepareRules(job, workingDir) {
-    try {
-      const rules = await SemgrepRule.find({
-        _id: { $in: job.ruleset },
-        enabled: true
-      });
-
-      if (rules.length === 0) {
-        throw new Error('No enabled rules found for scan');
-      }
-
-      const rulesConfig = {
-        rules: rules.map(rule => {
-          const ruleConfig = {
-            id: rule._id,
-            languages: rule.language,
-            message: rule.message,
-            severity: rule.severity,
-            patterns: rule.patterns
-          };
-          
-          if (rule.metadata && Object.keys(rule.metadata).length > 0) {
-            ruleConfig.metadata = rule.metadata;
-          }
-          
-          return ruleConfig;
-        })
-      };
-
-      const rulesFile = path.join(workingDir, 'scan-rules.yml');
-      await fs.writeFile(rulesFile, yaml.stringify(rulesConfig));
-      
-      return rulesFile;
-    } catch (error) {
-      throw new Error(`Failed to prepare rules: ${error.message}`);
-    }
-  }
-
   // Prepare semgrep rules file
   async prepareRules(job, workingDir) {
     try {
@@ -334,7 +315,6 @@ class ScanService {
       };
 
       // Write rules to YAML file
-      const yaml = require('yaml');
       const rulesFile = path.join(workingDir, 'scan-rules.yml');
       await fs.writeFile(rulesFile, yaml.stringify(rulesConfig));
       
@@ -344,7 +324,7 @@ class ScanService {
     }
   }
 
-  // Execute semgrep scan
+  // Execute semgrep scan (FIXED: Added Watchdog Timer)
   async runSemgrep(rulesFile, repoPath, job) {
     return new Promise((resolve, reject) => {
       const scanCommand = semgrepConfig.getScanCommand(rulesFile, repoPath, {
@@ -356,6 +336,29 @@ class ScanService {
 
       let output = '';
       let errorOutput = '';
+      let timer = null; // Timer untuk watchdog manual
+
+      // **FIX:** Watchdog timer manual (timeout + 1 menit buffer)
+      const timeoutMs = (job.scan_config.timeout_seconds + 60) * 1000; 
+      
+      //  1. Definisikan Aksi Cleanup
+      const cleanup = () => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        this.activeJobs.delete(job._id.toString());
+      };
+
+      // 2. Terapkan Watchdog Timer
+      timer = setTimeout(() => {
+        if (semgrep && !semgrep.killed) {
+            // Bunuh paksa jika sudah melewati batas waktu
+            semgrep.kill('SIGKILL'); 
+            cleanup();
+            reject(new Error(`Semgrep scan exceeded watchdog timeout of ${timeoutMs / 1000} seconds. Process was killed.`));
+        }
+      }, timeoutMs);
+
 
       semgrep.stdout.on('data', (data) => {
         output += data.toString();
@@ -366,6 +369,8 @@ class ScanService {
       });
 
       semgrep.on('close', (code) => {
+        cleanup(); // Pastikan timer dihentikan dan activeJobs dihapus
+
         // Semgrep exit codes: 0 = no findings, 1 = findings found, >1 = error
         if (code === 0 || code === 1) {
           try {
@@ -375,15 +380,21 @@ class ScanService {
             reject(new Error(`Failed to parse semgrep output: ${parseError.message}`));
           }
         } else {
-          reject(new Error(`Semgrep failed with exit code ${code}: ${errorOutput}`));
+          // Tangani kasus ketika code adalah null (dibunuh oleh SIGKILL atau OS)
+          const exitMessage = code === null 
+            ? `Semgrep process terminated unexpectedly (killed by SIGKILL or OS).` 
+            : `Semgrep failed with exit code ${code}.`;
+            
+          reject(new Error(`${exitMessage} Error output: ${errorOutput}`));
         }
       });
 
       semgrep.on('error', (error) => {
+        cleanup();
         reject(new Error(`Failed to start semgrep: ${error.message}`));
       });
 
-      // Store process reference for potential cancellation
+      // Simpan referensi proses
       this.activeJobs.set(job._id.toString(), { process: semgrep, job });
     });
   }
@@ -392,6 +403,9 @@ class ScanService {
   async processScanResults(job, semgrepResults) {
     const results = [];
     const duplicateMap = new Map();
+
+    // Delete existing results for the job to allow re-running
+    await ScanResult.deleteMany({ job_id: job._id });
 
     for (const result of semgrepResults) {
       try {
@@ -403,6 +417,7 @@ class ScanService {
         const scanResult = new ScanResult({
           job_id: job._id,
           rule_id: ruleId,
+          // Path cleaning is crucial
           file_path: result.path.replace(job.repository_info?.clone_url || '', '').replace(/^\/+/, ''),
           line_start: result.start?.line || 1,
           line_end: result.end?.line || result.start?.line || 1,
@@ -440,7 +455,14 @@ class ScanService {
           const originalResult = duplicateMap.get(fingerprint);
           await scanResult.markAsDuplicate(originalResult);
         } else {
-          duplicateMap.set(fingerprint, scanResult);
+          // Find if it's a known duplicate (e.g. in a previous scan)
+          const existingResult = await ScanResult.findByFingerprint(fingerprint);
+          if (existingResult.length > 0) {
+              const originalResult = existingResult[0];
+              await scanResult.markAsDuplicate(originalResult);
+          } else {
+              duplicateMap.set(fingerprint, scanResult);
+          }
         }
 
         await scanResult.save();
@@ -473,8 +495,9 @@ class ScanService {
       }
 
       // Update job status
-      await job.updateStatus('cancelled');
-      await job.addLog('info', 'Scan cancelled by user request');
+      job.updateStatus('cancelled');
+      job.addLog('info', 'Scan cancelled by user request');
+      await job.save(); // Save status update
 
       return job;
     } catch (error) {
@@ -542,15 +565,19 @@ class ScanService {
   async countFiles(dirPath) {
     let count = 0;
     const walk = async (dir) => {
-      const items = await fs.readdir(dir);
-      for (const item of items) {
-        const fullPath = path.join(dir, item);
-        const stat = await fs.stat(fullPath);
-        if (stat.isDirectory() && !item.startsWith('.')) {
-          await walk(fullPath);
-        } else if (stat.isFile()) {
-          count++;
+      try {
+        const items = await fs.readdir(dir);
+        for (const item of items) {
+          const fullPath = path.join(dir, item);
+          const stat = await fs.stat(fullPath);
+          if (stat.isDirectory() && !item.startsWith('.')) {
+            await walk(fullPath);
+          } else if (stat.isFile()) {
+            count++;
+          }
         }
+      } catch (error) {
+        // Ignore permission errors
       }
     };
     await walk(dirPath);
@@ -644,7 +671,6 @@ class ScanService {
     }
   }
 }
-
 
 
 module.exports = new ScanService();
